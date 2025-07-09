@@ -1,107 +1,271 @@
-# Stable Diffusion XL Text-to-Image Generator
+# 🎨 AI Image Studio
 
-A Python script for generating images from text prompts using Stable Diffusion XL in a GPU-enabled environment.
+A complete FastAPI-powered image generation and inpainting system using Stable Diffusion models. Features both text-to-image generation and advanced inpainting with an intuitive web interface.
 
 ## Features
 
-- 🚀 Uses `stabilityai/stable-diffusion-xl-base-1.0` model
-- ⚡ Optimized for GPU with FP16 precision
-- 🎨 Interactive prompt input or hardcoded prompts
-- 💾 Automatic image saving with timestamps
-- 🧹 Memory management and error handling
-- 📊 GPU status and progress monitoring
+### 🖼️ Text-to-Image Generation
+- 🚀 **SDXL Model**: `stabilityai/stable-diffusion-xl-base-1.0`
+- 🎯 **High Quality**: 1024x1024 native resolution
+- ⚡ **GPU Optimized**: FP16 precision with memory optimizations
+
+### 🎨 Advanced Inpainting
+- 🔧 **SD 2.0 Inpainting**: `stabilityai/stable-diffusion-2-inpainting`
+- 🖌️ **Interactive Canvas**: Draw directly on images to mark areas for regeneration
+- 🎯 **Precise Control**: Brush and eraser tools with adjustable sizes
+- 📱 **Touch Support**: Works on mobile devices
+
+### 🌐 Web Interface
+- 💻 **Beautiful UI**: Modern glass-morphism design
+- 📊 **Real-time Status**: Generation progress and GPU monitoring
+- 🔄 **Tabbed Interface**: Switch between text-to-image and inpainting
+- 📥 **Debug Tools**: Download processed images and masks
+
+### ⚡ Performance Optimizations
+- 🧠 **Memory Efficient**: xformers attention, CPU offload, attention slicing
+- 🔄 **GPU Cache Management**: Automatic cleanup after generation
+- 📊 **Resource Monitoring**: Real-time GPU usage tracking
+- 🚀 **FastAPI Backend**: High-performance async API
 
 ## Requirements
 
-- CUDA-compatible GPU
-- Python 3.8+
-- Required packages (see `requirements.txt`)
+- **GPU**: CUDA-compatible GPU with 12GB+ VRAM (16GB recommended)
+- **Python**: 3.8+
+- **Dependencies**: See `requirements.txt`
 
 ## Quick Start
 
-1. **Install dependencies:**
+### 🚀 Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repository-url>
+   cd InprintSelfHost
+   ```
+
+2. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Run the script:**
+### 🌐 Start the Web Interface
+
+1. **Launch the FastAPI server:**
    ```bash
-   python generate_image.py
-   ```
-   or
-   ```bash
-   ./generate_image.py
+   python app.py
    ```
 
-3. **Enter your prompt** when prompted, or modify the script to use hardcoded prompts.
+2. **Open your browser:**
+   ```
+   http://localhost:8000
+   ```
+   or if accessing remotely:
+   ```
+   http://YOUR_SERVER_IP:8000
+   ```
+
+3. **Start creating!** 🎨
+   - **Text-to-Image**: Enter prompts and generate images
+   - **Inpainting**: Upload images, draw masks, and regenerate specific areas
+
+### 📡 Alternative: Command Line (Legacy)
+
+For the original command-line interface:
+```bash
+python generate_image.py
+```
 
 ## Example Usage
 
+### 🌐 Web Interface
+
 ```bash
-$ python generate_image.py
-🔥 Starting Stable Diffusion XL Image Generation
-============================================================
+$ python app.py
+Loading Stable Diffusion XL model...
+Model: stabilityai/stable-diffusion-xl-base-1.0
 ✅ CUDA is available
-📊 GPU Device: NVIDIA A100-SXM4-40GB
-💾 GPU Memory: 40.0 GB
-🚀 Loading Stable Diffusion XL model...
-📦 Model: stabilityai/stable-diffusion-xl-base-1.0
-🔄 Moving model to GPU...
+📊 GPU Device: NVIDIA RTX 4090
+💾 GPU Memory: 24.0 GB
 ⚡ Enabled xformers memory efficient attention
 ✅ Model loaded successfully!
 
-==================================================
-🎨 TEXT-TO-IMAGE GENERATOR
-==================================================
-📝 Enter your image prompt: A majestic dragon flying over a cyberpunk city at sunset
+Loading Stable Diffusion 2.0 Inpainting model...
+Model: stabilityai/stable-diffusion-2-inpainting
+✅ Inpainting model loaded successfully!
 
-🎯 Generating image from prompt: 'A majestic dragon flying over a cyberpunk city at sunset'
-⏳ This may take 20-60 seconds depending on your GPU...
-💾 Image saved as: output_20231201_143022.png
-📍 Full path: /workspace/output_20231201_143022.png
-💾 Also saved as: output.png
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
 
-🎉 Image generation completed successfully!
-📝 Prompt: A majestic dragon flying over a cyberpunk city at sunset
-🖼️  Output: output_20231201_143022.png
-🧹 GPU cache cleared
+**Then open your browser to `http://localhost:8000` and enjoy the web interface!**
+
+### 📡 API Usage
+
+#### Text-to-Image Generation
+```bash
+curl -X POST "http://localhost:8000/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a majestic dragon flying over a cyberpunk city at sunset",
+    "num_inference_steps": 30,
+    "guidance_scale": 7.5,
+    "width": 1024,
+    "height": 1024
+  }'
+```
+
+#### Inpainting
+```bash
+curl -X POST "http://localhost:8000/inpaint" \
+  -F "image=@original.jpg" \
+  -F "mask=@mask.png" \
+  -F "prompt=a red baseball cap on the dog's head" \
+  -F "num_inference_steps=50" \
+  -F "guidance_scale=7.5" \
+  -F "strength=0.95"
+```
+
+#### Health Check
+```bash
+curl http://localhost:8000/health
 ```
 
 ## Configuration
 
-### Hardcoded Prompts
-To use hardcoded prompts instead of interactive input, uncomment this line in `get_prompt()`:
+### 🌐 Web Interface Settings
+
+All parameters can be adjusted through the web interface:
+
+#### Text-to-Image Parameters
+- **Inference Steps**: 15-50 (default: 20)
+- **Guidance Scale**: 5.0-15.0 (default: 7.5)
+- **Dimensions**: 512px-1024px (default: 1024x1024)
+
+#### Inpainting Parameters  
+- **Inference Steps**: 20-75 (default: 50)
+- **Guidance Scale**: 7.5-15.0 (default: 7.5)
+- **Strength**: 0.7-1.0 (default: 0.95) - How much to change masked areas
+- **Brush Size**: 5-50px (default: 20px)
+
+### 🔧 Server Configuration
+
+Edit `app.py` to modify server settings:
+
 ```python
-return "An astronaut riding a green horse"
+# Change server host/port
+uvicorn.run(
+    "app:app",
+    host="0.0.0.0",    # Change to "127.0.0.1" for local only
+    port=8000,         # Change port if needed
+    log_level="info",
+    reload=False       # Set to True for development
+)
 ```
 
-### Memory Optimization
-If you run into GPU memory issues, uncomment this line in `load_model()`:
-```python
-pipe.enable_model_cpu_offload()
-```
+### 🧠 Memory Optimization
 
-### Generation Parameters
-Modify these parameters in `generate_image()` for different results:
-- `num_inference_steps`: Higher = better quality, slower (default: 30)
-- `guidance_scale`: Higher = more prompt adherence (default: 7.5)
-- `height`/`width`: Image dimensions (default: 1024x1024)
+GPU optimizations are automatically enabled:
+- ✅ xformers memory efficient attention
+- ✅ Model CPU offload
+- ✅ Attention slicing
+- ✅ VAE slicing
+- ✅ Automatic GPU cache clearing
 
-## Output
+For lower VRAM GPUs, you can disable CPU offload in the model loading functions.
 
-- Images are saved with timestamps: `output_YYYYMMDD_HHMMSS.png`
-- Also saved as `output.png` for easy access
-- Full file paths are displayed in the console
+## 📡 API Endpoints
+
+- **GET** `/` - Web UI interface
+- **GET** `/health` - Server and GPU status
+- **GET** `/docs` - Automatic API documentation (Swagger UI)
+- **POST** `/generate` - Text-to-image generation
+- **POST** `/inpaint` - Image inpainting
+
+## 🎯 Web Interface Features
+
+### Text-to-Image Tab
+- Enter prompts and generate high-quality 1024x1024 images
+- Advanced settings for fine-tuning generation
+- Real-time generation status and timing
+
+### Inpainting Tab  
+- Upload images with drag & drop support
+- Interactive canvas with brush and eraser tools
+- Real-time mask preview (black/white)
+- Download processed images and masks for debugging
+- Touch support for mobile devices
 
 ## Troubleshooting
 
-- **CUDA not available**: Ensure you're running in a GPU-enabled environment
-- **Out of memory**: Try enabling `model_cpu_offload()` or reducing image resolution
-- **Model download fails**: Check internet connection and Hugging Face access
+### 🚨 Common Issues
+
+**Server won't start:**
+```bash
+# Install missing dependency
+pip install python-multipart
+```
+
+**CUDA not available:**
+- Ensure you're running in a GPU-enabled environment
+- Check CUDA installation: `nvidia-smi`
+
+**Out of memory:**
+- Close other GPU applications
+- Reduce image resolution in advanced settings
+- Try text-to-image with smaller dimensions first
+
+**Inpainting not working:**
+- Check mask preview - white areas should be clearly visible
+- Use more specific prompts (e.g., "red baseball cap with white logo")
+- Try higher strength values (0.9-1.0)
+- Download mask to verify it's correct
+
+**Models downloading slowly:**
+- First run downloads ~8GB total (SDXL + SD 2.0 models)
+- Subsequent runs use cached models
+- Ensure stable internet connection
+
+### 🔗 Remote Access
+
+**SSH Port Forwarding (Secure):**
+```bash
+ssh -L 8000:localhost:8000 user@your-server
+```
+
+**Direct IP Access:**
+- Server runs on `http://0.0.0.0:8000` by default
+- Access via `http://YOUR_SERVER_IP:8000`
+- **Security Note**: Add authentication for production use
 
 ## Notes
 
-- First run will download the model (~6GB)
-- Subsequent runs will use cached model files
-- Generation typically takes 20-60 seconds depending on GPU
-- Press Ctrl+C to interrupt generation 
+- 🕐 **Generation Times**: 20-60s for text-to-image, 30-90s for inpainting
+- 💾 **Model Cache**: ~/.cache/huggingface/transformers/
+- 🔄 **GPU Memory**: Automatically cleared after each generation
+- 📱 **Mobile Support**: Full touch interface for tablets/phones
+- 🎨 **Image Formats**: Input (JPG/PNG), Output (PNG with base64 encoding)
+
+## 📁 Project Structure
+
+```
+InprintSelfHost/
+├── app.py                 # 🚀 Main FastAPI application with web UI
+├── generate_image.py      # 📡 Legacy command-line generator
+├── requirements.txt       # 📦 Python dependencies
+└── README.md             # 📚 This documentation
+```
+
+## 🎯 Quick Summary
+
+This is a **complete AI image generation solution** that combines:
+
+1. **🖼️ High-Quality Text-to-Image**: SDXL model for stunning 1024x1024 images
+2. **🎨 Professional Inpainting**: Interactive canvas with SD 2.0 for precise edits
+3. **🌐 Beautiful Web Interface**: Modern UI with real-time feedback
+4. **⚡ GPU Optimized**: Memory efficient with automatic resource management
+5. **📡 REST API**: Use programmatically or integrate into other applications
+
+**Perfect for**: Artists, developers, researchers, or anyone wanting professional AI image generation with full control and no API costs!
+
+---
+
+**🌟 Enjoy creating amazing images with AI! 🎨** 
