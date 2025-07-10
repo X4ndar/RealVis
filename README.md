@@ -1,271 +1,307 @@
-# 🎨 AI Image Studio
+# 🎨 RealVis 5 API Client - External API Proxy
 
-A complete FastAPI-powered image generation and inpainting system using Stable Diffusion models. Features both text-to-image generation and advanced inpainting with an intuitive web interface.
+> **Proxy service that forwards requests to your external RealVis 5 API on RunPod**
 
-## Features
+This repository contains a FastAPI-based proxy/client that forwards image generation requests to your external RealVis 5 API hosted on RunPod. It provides authentication, CORS management, and seamless integration for your Next.js frontend.
 
-### 🖼️ Text-to-Image Generation
-- 🚀 **SDXL Model**: `stabilityai/stable-diffusion-xl-base-1.0`
-- 🎯 **High Quality**: 1024x1024 native resolution
-- ⚡ **GPU Optimized**: FP16 precision with memory optimizations
+## 🔄 Architecture
 
-### 🎨 Advanced Inpainting
-- 🔧 **SD 2.0 Inpainting**: `stabilityai/stable-diffusion-2-inpainting`
-- 🖌️ **Interactive Canvas**: Draw directly on images to mark areas for regeneration
-- 🎯 **Precise Control**: Brush and eraser tools with adjustable sizes
-- 📱 **Touch Support**: Works on mobile devices
-
-### 🌐 Web Interface
-- 💻 **Beautiful UI**: Modern glass-morphism design
-- 📊 **Real-time Status**: Generation progress and GPU monitoring
-- 🔄 **Tabbed Interface**: Switch between text-to-image and inpainting
-- 📥 **Debug Tools**: Download processed images and masks
-
-### ⚡ Performance Optimizations
-- 🧠 **Memory Efficient**: xformers attention, CPU offload, attention slicing
-- 🔄 **GPU Cache Management**: Automatic cleanup after generation
-- 📊 **Resource Monitoring**: Real-time GPU usage tracking
-- 🚀 **FastAPI Backend**: High-performance async API
-
-## Requirements
-
-- **GPU**: CUDA-compatible GPU with 12GB+ VRAM (16GB recommended)
-- **Python**: 3.8+
-- **Dependencies**: See `requirements.txt`
-
-## Quick Start
-
-### 🚀 Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd InprintSelfHost
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### 🌐 Start the Web Interface
-
-1. **Launch the FastAPI server:**
-   ```bash
-   python app.py
-   ```
-
-2. **Open your browser:**
-   ```
-   http://localhost:8000
-   ```
-   or if accessing remotely:
-   ```
-   http://YOUR_SERVER_IP:8000
-   ```
-
-3. **Start creating!** 🎨
-   - **Text-to-Image**: Enter prompts and generate images
-   - **Inpainting**: Upload images, draw masks, and regenerate specific areas
-
-### 📡 Alternative: Command Line (Legacy)
-
-For the original command-line interface:
-```bash
-python generate_image.py
+```
+Next.js Frontend → API Client (this app) → External RunPod API
+                     ↓
+              Auth + CORS + Monitoring
 ```
 
-## Example Usage
+## ✨ Features
 
-### 🌐 Web Interface
+- 🔄 **Request Proxy**: Forward requests to external RealVis 5 API
+- 🔐 **Optional Authentication**: Secure proxy access with API keys
+- 🌍 **CORS Management**: Handle cross-origin requests for frontends
+- 📊 **Health Monitoring**: Monitor external API status and availability
+- ⚡ **Request Management**: Centralized error handling and timeouts
+- 🔧 **Environment Configuration**: Flexible deployment settings
+- 📝 **Comprehensive Logging**: Track all proxy requests and responses
+
+## 🚀 Quick Start
+
+### 1. Setup Environment
 
 ```bash
-$ python app.py
-Loading Stable Diffusion XL model...
-Model: stabilityai/stable-diffusion-xl-base-1.0
-✅ CUDA is available
-📊 GPU Device: NVIDIA RTX 4090
-💾 GPU Memory: 24.0 GB
-⚡ Enabled xformers memory efficient attention
-✅ Model loaded successfully!
+# Clone and navigate to the project
+cd your-project-directory
 
-Loading Stable Diffusion 2.0 Inpainting model...
-Model: stabilityai/stable-diffusion-2-inpainting
-✅ Inpainting model loaded successfully!
+# Create .env file from the example in text.txt
+cp text.txt .env
 
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+# Edit .env with your external API URL
+nano .env
 ```
 
-**Then open your browser to `http://localhost:8000` and enjoy the web interface!**
+### 2. Configure External API
 
-### 📡 API Usage
+Edit your `.env` file:
 
-#### Text-to-Image Generation
+```env
+# Your RunPod API endpoint
+API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+
+# Optional proxy authentication
+API_KEY=your-secure-proxy-key
+
+# CORS for your frontend
+ALLOWED_ORIGINS=https://your-frontend-domain.com
+```
+
+### 3. Install Dependencies
+
 ```bash
-curl -X POST "http://localhost:8000/generate" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "a majestic dragon flying over a cyberpunk city at sunset",
-    "num_inference_steps": 30,
-    "guidance_scale": 7.5,
-    "width": 1024,
-    "height": 1024
-  }'
+pip install -r requirements.txt
 ```
 
-#### Inpainting
+### 4. Run the Proxy
+
 ```bash
-curl -X POST "http://localhost:8000/inpaint" \
-  -F "image=@original.jpg" \
-  -F "mask=@mask.png" \
-  -F "prompt=a red baseball cap on the dog's head" \
-  -F "num_inference_steps=50" \
-  -F "guidance_scale=7.5" \
-  -F "strength=0.95"
+python app.py
 ```
 
-#### Health Check
+Your proxy will be available at `http://0.0.0.0:8000`
+
+## 📡 Proxy Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Proxy and external API health status |
+| `/generate` | POST | Proxy text-to-image requests |
+| `/inpaint` | POST | Proxy inpainting requests |
+| `/docs` | GET | Interactive API documentation |
+| `/api` | GET | Proxy configuration info |
+
+## 🔧 Configuration
+
+### External API Settings
+```env
+# Your external RunPod API
+API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+EXTERNAL_API_TIMEOUT=300
+
+# Proxy server
+HOST=0.0.0.0
+PORT=8000
+```
+
+### Authentication (Optional)
+```env
+# Enable proxy authentication
+API_KEY=your-secure-proxy-key
+
+# Disable authentication (development)
+API_KEY=
+```
+
+### CORS Configuration
+```env
+# Production: Specific domain
+ALLOWED_ORIGINS=https://yourdomain.com
+
+# Development: Allow all
+ALLOWED_ORIGINS=*
+
+# Multiple domains
+ALLOWED_ORIGINS=https://domain1.com,https://domain2.com
+```
+
+## 🌐 Frontend Integration
+
+### JavaScript/Next.js Example
+
+```javascript
+// Connect to your proxy (not directly to RunPod)
+const PROXY_URL = 'http://your-proxy-host:8000';
+
+const response = await fetch(`${PROXY_URL}/generate`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer YOUR_PROXY_API_KEY' // If proxy auth enabled
+  },
+  body: JSON.stringify({
+    prompt: "a stunning photorealistic portrait",
+    num_inference_steps: 25,
+    guidance_scale: 2.0,
+    height: 1024,
+    width: 1024
+  })
+});
+
+const result = await response.json();
+// result.image contains base64 encoded image
+```
+
+### Health Check Example
+
+```javascript
+// Check both proxy and external API status
+const healthResponse = await fetch(`${PROXY_URL}/health`);
+const health = await healthResponse.json();
+
+console.log('Proxy Status:', health.status);
+console.log('External API Status:', health.external_api_status);
+console.log('External API URL:', health.external_api_url);
+```
+
+## 🔐 Authentication Layers
+
+The proxy supports **two authentication levels**:
+
+1. **Proxy Authentication** (optional):
+   - Protects access to your proxy service
+   - Set `API_KEY` in proxy's `.env`
+   - Include `Authorization: Bearer PROXY_KEY` in requests
+
+2. **External API Authentication**:
+   - Handled by your RunPod instance
+   - Configured on the external API side
+
+## ⚡ Benefits of Proxy Architecture
+
+### 🔐 Security
+- Add authentication without modifying external API
+- Protect direct access to RunPod endpoints
+- Centralized access control
+
+### 🌍 CORS Management
+- Handle cross-origin requests for web frontends
+- Avoid CORS issues between frontend and RunPod
+- Flexible origin configuration
+
+### 📊 Monitoring & Control
+- Monitor external API health and availability
+- Track request/response patterns
+- Centralized error handling and logging
+
+### 🔄 Flexibility
+- Easy to switch external API providers
+- Independent scaling of proxy and external API
+- Development/testing with different external APIs
+
+## 🚨 Error Handling
+
+The proxy provides enhanced error responses:
+
+```json
+{
+  "detail": "External API timeout after 300 seconds"
+}
+```
+
+**Common Error Codes:**
+- `503` - External API unreachable
+- `504` - External API timeout  
+- `401` - Proxy authentication required
+- `4xx/5xx` - External API errors (forwarded)
+
+## 🔧 Deployment Scenarios
+
+### Development Setup
+```env
+API_KEY=                    # No proxy auth
+ALLOWED_ORIGINS=*           # Allow all origins  
+DEBUG=true                  # Hot reload
+LOG_LEVEL=DEBUG            # Verbose logging
+API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+```
+
+### Production Setup
+```env
+API_KEY=super-secure-key    # Enable proxy auth
+ALLOWED_ORIGINS=https://yourdomain.com  # Restrict origins
+DEBUG=false                 # Production mode
+LOG_LEVEL=INFO             # Standard logging
+API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+```
+
+### Multi-Environment
+- **Local Proxy**: Run proxy locally for development
+- **Cloud Proxy**: Deploy proxy to cloud for production
+- **External API**: RunPod instance remains the same
+
+## 📊 Monitoring
+
+### Health Monitoring
 ```bash
-curl http://localhost:8000/health
+curl http://your-proxy:8000/health
 ```
 
-## Configuration
+Response includes:
+- Proxy service status
+- External API connectivity
+- External API health status
+- Configuration details
 
-### 🌐 Web Interface Settings
+### Request Logging
+The proxy logs all:
+- Incoming requests from frontend
+- Outgoing requests to external API
+- Response times and status codes
+- Error conditions and timeouts
 
-All parameters can be adjusted through the web interface:
+## 🚀 Deployment Options
 
-#### Text-to-Image Parameters
-- **Inference Steps**: 15-50 (default: 20)
-- **Guidance Scale**: 5.0-15.0 (default: 7.5)
-- **Dimensions**: 512px-1024px (default: 1024x1024)
-
-#### Inpainting Parameters  
-- **Inference Steps**: 20-75 (default: 50)
-- **Guidance Scale**: 7.5-15.0 (default: 7.5)
-- **Strength**: 0.7-1.0 (default: 0.95) - How much to change masked areas
-- **Brush Size**: 5-50px (default: 20px)
-
-### 🔧 Server Configuration
-
-Edit `app.py` to modify server settings:
-
-```python
-# Change server host/port
-uvicorn.run(
-    "app:app",
-    host="0.0.0.0",    # Change to "127.0.0.1" for local only
-    port=8000,         # Change port if needed
-    log_level="info",
-    reload=False       # Set to True for development
-)
-```
-
-### 🧠 Memory Optimization
-
-GPU optimizations are automatically enabled:
-- ✅ xformers memory efficient attention
-- ✅ Model CPU offload
-- ✅ Attention slicing
-- ✅ VAE slicing
-- ✅ Automatic GPU cache clearing
-
-For lower VRAM GPUs, you can disable CPU offload in the model loading functions.
-
-## 📡 API Endpoints
-
-- **GET** `/` - Web UI interface
-- **GET** `/health` - Server and GPU status
-- **GET** `/docs` - Automatic API documentation (Swagger UI)
-- **POST** `/generate` - Text-to-image generation
-- **POST** `/inpaint` - Image inpainting
-
-## 🎯 Web Interface Features
-
-### Text-to-Image Tab
-- Enter prompts and generate high-quality 1024x1024 images
-- Advanced settings for fine-tuning generation
-- Real-time generation status and timing
-
-### Inpainting Tab  
-- Upload images with drag & drop support
-- Interactive canvas with brush and eraser tools
-- Real-time mask preview (black/white)
-- Download processed images and masks for debugging
-- Touch support for mobile devices
-
-## Troubleshooting
-
-### 🚨 Common Issues
-
-**Server won't start:**
+### Local Development
 ```bash
-# Install missing dependency
-pip install python-multipart
+# Run proxy locally
+python app.py
+
+# Frontend connects to localhost:8000
+# Proxy forwards to RunPod
 ```
 
-**CUDA not available:**
-- Ensure you're running in a GPU-enabled environment
-- Check CUDA installation: `nvidia-smi`
+### Cloud Deployment
+- Deploy proxy to any cloud provider
+- Configure `API_BASE_URL` to your RunPod instance
+- Frontend connects to cloud proxy
+- Benefits: Better uptime, global availability
 
-**Out of memory:**
-- Close other GPU applications
-- Reduce image resolution in advanced settings
-- Try text-to-image with smaller dimensions first
-
-**Inpainting not working:**
-- Check mask preview - white areas should be clearly visible
-- Use more specific prompts (e.g., "red baseball cap with white logo")
-- Try higher strength values (0.9-1.0)
-- Download mask to verify it's correct
-
-**Models downloading slowly:**
-- First run downloads ~8GB total (SDXL + SD 2.0 models)
-- Subsequent runs use cached models
-- Ensure stable internet connection
-
-### 🔗 Remote Access
-
-**SSH Port Forwarding (Secure):**
-```bash
-ssh -L 8000:localhost:8000 user@your-server
+### Docker Deployment
+```dockerfile
+FROM python:3.9-slim
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "app.py"]
 ```
 
-**Direct IP Access:**
-- Server runs on `http://0.0.0.0:8000` by default
-- Access via `http://YOUR_SERVER_IP:8000`
-- **Security Note**: Add authentication for production use
+## 🛠 Development
 
-## Notes
+The proxy is built with:
+- **FastAPI**: Modern Python web framework
+- **httpx**: Async HTTP client for external API calls
+- **Pydantic**: Data validation and serialization
+- **Environment Configuration**: Flexible `.env` setup
 
-- 🕐 **Generation Times**: 20-60s for text-to-image, 30-90s for inpainting
-- 💾 **Model Cache**: ~/.cache/huggingface/transformers/
-- 🔄 **GPU Memory**: Automatically cleared after each generation
-- 📱 **Mobile Support**: Full touch interface for tablets/phones
-- 🎨 **Image Formats**: Input (JPG/PNG), Output (PNG with base64 encoding)
+## 📚 Documentation
 
-## 📁 Project Structure
+- **API Usage**: See `API_USAGE.md` for detailed integration guide
+- **Configuration**: Complete `.env` example in `text.txt`
+- **Interactive Docs**: Available at `/docs` when running
+- **External API**: Your RunPod instance documentation
 
-```
-InprintSelfHost/
-├── app.py                 # 🚀 Main FastAPI application with web UI
-├── generate_image.py      # 📡 Legacy command-line generator
-├── requirements.txt       # 📦 Python dependencies
-└── README.md             # 📚 This documentation
-```
+## 🔄 Request Flow
 
-## 🎯 Quick Summary
+1. **Frontend** sends request to **Proxy**
+2. **Proxy** validates authentication & CORS
+3. **Proxy** forwards request to **External API** (RunPod)
+4. **External API** processes and returns response
+5. **Proxy** forwards response back to **Frontend**
 
-This is a **complete AI image generation solution** that combines:
+## 🤝 Support
 
-1. **🖼️ High-Quality Text-to-Image**: SDXL model for stunning 1024x1024 images
-2. **🎨 Professional Inpainting**: Interactive canvas with SD 2.0 for precise edits
-3. **🌐 Beautiful Web Interface**: Modern UI with real-time feedback
-4. **⚡ GPU Optimized**: Memory efficient with automatic resource management
-5. **📡 REST API**: Use programmatically or integrate into other applications
-
-**Perfect for**: Artists, developers, researchers, or anyone wanting professional AI image generation with full control and no API costs!
+For questions about:
+- **Proxy Configuration**: Check `text.txt` for environment options
+- **Integration**: See examples in `API_USAGE.md`  
+- **External API**: Refer to your RunPod instance documentation
+- **Testing**: Use interactive docs at `/docs`
 
 ---
 
-**🌟 Enjoy creating amazing images with AI! 🎨** 
+**Ready to proxy requests to your RunPod RealVis 5 API!** 🚀✨ 

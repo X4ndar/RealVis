@@ -1,28 +1,83 @@
 #!/usr/bin/env python3
 """
-FastAPI REST API for Stable Diffusion XL Image Generation
-Based on the existing generate_image.py script with GPU optimizations.
+RealVis 5 FastAPI Backend - Local Model Execution
+FastAPI backend that runs RealVis 5 models locally for frontend communication.
 """
 
 import logging
 import base64
 import io
 import torch
-import threading
 import time
+import os
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from diffusers import DiffusionPipeline, AutoPipelineForInpainting
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
+from diffusers.pipelines.auto_pipeline import AutoPipelineForInpainting
 from PIL import Image
 import uvicorn
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+# Configuration from environment variables
+API_KEY = os.getenv("API_KEY")  # Optional - leave empty to disable auth
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+# CORS Configuration
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+ALLOWED_METHODS = os.getenv("ALLOWED_METHODS", "GET,POST,PUT,DELETE,OPTIONS").split(",")
+ALLOWED_HEADERS = os.getenv("ALLOWED_HEADERS", "*").split(",")
+ALLOW_CREDENTIALS = os.getenv("ALLOW_CREDENTIALS", "true").lower() == "true"
+
+# Model Configuration
+REALVIS_MODEL = os.getenv("REALVIS_MODEL", "GraydientPlatformAPI/realvis5light-xl")
+INPAINTING_MODEL = os.getenv("INPAINTING_MODEL", "stabilityai/stable-diffusion-2-inpainting")
+MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR")
+
+# Generation Defaults & Limits
+DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "25"))
+DEFAULT_GUIDANCE_SCALE = float(os.getenv("DEFAULT_GUIDANCE_SCALE", "2.0"))
+DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
+DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
+DEFAULT_NEGATIVE_PROMPT = os.getenv("DEFAULT_NEGATIVE_PROMPT", "cartoon, anime, painted, artificial, low quality, blurry, distorted")
+
+MAX_STEPS = int(os.getenv("MAX_STEPS", "50"))
+MAX_WIDTH = int(os.getenv("MAX_WIDTH", "1536"))
+MAX_HEIGHT = int(os.getenv("MAX_HEIGHT", "1536"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "10"))
+
+# GPU Optimizations
+ENABLE_GPU_OPTIMIZATIONS = os.getenv("ENABLE_GPU_OPTIMIZATIONS", "true").lower() == "true"
+ENABLE_XFORMERS = os.getenv("ENABLE_XFORMERS", "true").lower() == "true"
+ENABLE_CPU_OFFLOAD = os.getenv("ENABLE_CPU_OFFLOAD", "true").lower() == "true"
+ENABLE_ATTENTION_SLICING = os.getenv("ENABLE_ATTENTION_SLICING", "true").lower() == "true"
+ENABLE_VAE_SLICING = os.getenv("ENABLE_VAE_SLICING", "true").lower() == "true"
+
+# Logging Configuration
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FORMAT = os.getenv("LOG_FORMAT", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+LOG_GPU_MEMORY = os.getenv("LOG_GPU_MEMORY", "true").lower() == "true"
+
+# Deployment URLs
+API_BASE_URL = os.getenv("API_BASE_URL", "https://do9n3s330iext0-8000.proxy.runpod.net")
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, LOG_LEVEL),
+    format=LOG_FORMAT
 )
 logger = logging.getLogger(__name__)
 
@@ -31,27 +86,59 @@ pipeline = None
 inpaint_pipeline = None
 
 class GenerateRequest(BaseModel):
-    prompt: str
-    num_inference_steps: int = 20
-    guidance_scale: float = 7.5
-    height: int = 1024
-    width: int = 1024
+    prompt: str = Field(..., description="Text prompt for image generation")
+    negative_prompt: Optional[str] = Field(default=None, description="Negative prompt to avoid unwanted elements")
+    num_inference_steps: int = Field(default=DEFAULT_STEPS, ge=1, le=MAX_STEPS, description="Number of inference steps")
+    guidance_scale: float = Field(default=DEFAULT_GUIDANCE_SCALE, ge=0.1, le=20.0, description="Guidance scale for prompt adherence")
+    height: int = Field(default=DEFAULT_HEIGHT, ge=64, le=MAX_HEIGHT, description="Image height in pixels")
+    width: int = Field(default=DEFAULT_WIDTH, ge=64, le=MAX_WIDTH, description="Image width in pixels")
 
 class GenerateResponse(BaseModel):
-    image: str
-    prompt: str
-    generation_time: float
+    image: str = Field(..., description="Base64 encoded generated image")
+    prompt: str = Field(..., description="Text prompt used for generation")
+    negative_prompt: Optional[str] = Field(..., description="Negative prompt used")
+    generation_time: float = Field(..., description="Time taken for generation in seconds")
+    model_used: str = Field(..., description="Model used for generation")
 
 class InpaintRequest(BaseModel):
-    prompt: str
-    num_inference_steps: int = 20
-    guidance_scale: float = 8.0
-    strength: float = 0.99
+    prompt: str = Field(..., description="Text prompt for inpainting")
+    negative_prompt: Optional[str] = Field(default=None, description="Negative prompt to avoid unwanted elements")
+    num_inference_steps: int = Field(default=30, ge=1, le=MAX_STEPS, description="Number of inference steps")
+    guidance_scale: float = Field(default=8.0, ge=0.1, le=20.0, description="Guidance scale for prompt adherence")
+    strength: float = Field(default=0.95, ge=0.1, le=1.0, description="Inpainting strength")
 
 class InpaintResponse(BaseModel):
-    image: str
-    prompt: str
-    generation_time: float
+    image: str = Field(..., description="Base64 encoded inpainted image")
+    prompt: str = Field(..., description="Text prompt used for inpainting")
+    negative_prompt: Optional[str] = Field(..., description="Negative prompt used")
+    generation_time: float = Field(..., description="Time taken for inpainting in seconds")
+    model_used: str = Field(..., description="Model used for inpainting")
+
+class HealthResponse(BaseModel):
+    status: str = Field(..., description="Server health status")
+    realvis_loaded: bool = Field(..., description="Whether RealVis 5 model is loaded")
+    inpainting_loaded: bool = Field(..., description="Whether inpainting model is loaded")
+    cuda_available: bool = Field(..., description="Whether CUDA is available")
+    gpu_info: dict = Field(..., description="GPU information")
+    api_base_url: str = Field(..., description="API base URL")
+    api_version: str = Field(..., description="API version")
+    environment: str = Field(..., description="Deployment environment")
+
+# Authentication function
+async def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)):
+    """Verify API key if authentication is enabled."""
+    if API_KEY:  # Only check if API_KEY is set in environment
+        if not credentials:
+            raise HTTPException(
+                status_code=401,
+                detail="API key required. Include 'Authorization: Bearer YOUR_API_KEY' in headers."
+            )
+        if credentials.credentials != API_KEY:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API key."
+            )
+    return True
 
 def check_gpu_availability():
     """Check if CUDA is available and print GPU info."""
@@ -66,7 +153,7 @@ def check_gpu_availability():
 
 def print_gpu_usage(stage=""):
     """Print detailed GPU memory usage information."""
-    if not torch.cuda.is_available():
+    if not LOG_GPU_MEMORY or not torch.cuda.is_available():
         return
     
     device = torch.cuda.current_device()
@@ -81,90 +168,102 @@ def print_gpu_usage(stage=""):
     logger.info(f"   Reserved: {reserved / 1e9:.2f} GB ({reserved/total_memory*100:.1f}%)")
     logger.info(f"   Free: {free_memory / 1e9:.2f} GB ({free_memory/total_memory*100:.1f}%)")
 
-def load_optimized_model():
-    """Load the Stable Diffusion XL model with optimized settings (from generate_image.py)."""
-    logger.info("Loading Stable Diffusion XL model with optimizations...")
-    logger.info("Model: stabilityai/stable-diffusion-xl-base-1.0")
+def load_realvis_model():
+    """Load the RealVis 5 model with optimized settings."""
+    logger.info(f"Loading RealVis 5 model: {REALVIS_MODEL}")
     
     try:
-        pipe = DiffusionPipeline.from_pretrained(
-            "stabilityai/stable-diffusion-xl-base-1.0",
+        cache_dir = MODEL_CACHE_DIR if MODEL_CACHE_DIR else None
+        
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            REALVIS_MODEL,
             torch_dtype=torch.float16,
             use_safetensors=True,
-            variant="fp16"
+            cache_dir=cache_dir
         )
         
         logger.info("Moving model to GPU...")
         pipe = pipe.to("cuda")
         
-        # Enable memory efficient attention for older PyTorch versions
-        if hasattr(pipe, 'enable_xformers_memory_efficient_attention'):
-            try:
-                pipe.enable_xformers_memory_efficient_attention()
-                logger.info("Enabled xformers memory efficient attention")
-            except:
-                logger.info("xformers not available, using default attention")
-        
-        # Enable memory optimizations for low VRAM GPUs
-        pipe.enable_model_cpu_offload()
-        logger.info("Enabled model CPU offload for memory optimization")
-        
-        # Enable memory efficient attention
-        try:
-            pipe.enable_attention_slicing()
-            logger.info("Enabled attention slicing")
-        except:
-            logger.info("Attention slicing not available")
+        # Apply GPU optimizations if enabled
+        if ENABLE_GPU_OPTIMIZATIONS:
+            # Enable xFormers if available and enabled
+            if ENABLE_XFORMERS and hasattr(pipe, 'enable_xformers_memory_efficient_attention'):
+                try:
+                    pipe.enable_xformers_memory_efficient_attention()
+                    logger.info("Enabled xFormers memory efficient attention")
+                except:
+                    logger.info("xFormers not available, using default attention")
             
-        # Enable VAE slicing for lower memory usage
-        try:
-            pipe.enable_vae_slicing()
-            logger.info("Enabled VAE slicing")
-        except:
-            logger.info("VAE slicing not available")
+            # Enable model CPU offload
+            if ENABLE_CPU_OFFLOAD:
+                pipe.enable_model_cpu_offload()
+                logger.info("Enabled model CPU offload for memory optimization")
+            
+            # Enable attention slicing
+            if ENABLE_ATTENTION_SLICING:
+                try:
+                    pipe.enable_attention_slicing()
+                    logger.info("Enabled attention slicing")
+                except:
+                    logger.info("Attention slicing not available")
+                
+            # Enable VAE slicing
+            if ENABLE_VAE_SLICING:
+                try:
+                    pipe.enable_vae_slicing()
+                    logger.info("Enabled VAE slicing")
+                except:
+                    logger.info("VAE slicing not available")
         
-        logger.info("Model loaded successfully with memory optimizations!")
-        print_gpu_usage("(After Model Loading)")
+        logger.info("RealVis 5 model loaded successfully with optimizations!")
+        print_gpu_usage("(After RealVis Model Loading)")
         
         return pipe
         
     except Exception as e:
-        logger.error(f"Error loading model: {e}")
+        logger.error(f"Error loading RealVis 5 model: {e}")
         return None
 
 def load_inpainting_model():
-    """Load the SD 2.0 inpainting model with optimized settings."""
-    logger.info("Loading Stable Diffusion 2.0 Inpainting model...")
-    logger.info("Model: stabilityai/stable-diffusion-2-inpainting")
+    """Load the inpainting model with optimized settings."""
+    logger.info(f"Loading inpainting model: {INPAINTING_MODEL}")
     
     try:
+        cache_dir = MODEL_CACHE_DIR if MODEL_CACHE_DIR else None
+        
         pipe = AutoPipelineForInpainting.from_pretrained(
-            "stabilityai/stable-diffusion-2-inpainting",
-            torch_dtype=torch.float16
+            INPAINTING_MODEL,
+            torch_dtype=torch.float16,
+            cache_dir=cache_dir
         ).to("cuda")
         
-        # Apply same optimizations as text-to-image model
-        if hasattr(pipe, 'enable_xformers_memory_efficient_attention'):
-            try:
-                pipe.enable_xformers_memory_efficient_attention()
-                logger.info("Enabled xformers for inpainting")
-            except:
-                logger.info("xformers not available for inpainting")
-        
-        pipe.enable_model_cpu_offload()
-        logger.info("Enabled model CPU offload for inpainting")
-        
-        try:
-            pipe.enable_attention_slicing()
-            logger.info("Enabled attention slicing for inpainting")
-        except:
-            logger.info("Attention slicing not available for inpainting")
+        # Apply same optimizations as RealVis model
+        if ENABLE_GPU_OPTIMIZATIONS:
+            if ENABLE_XFORMERS and hasattr(pipe, 'enable_xformers_memory_efficient_attention'):
+                try:
+                    pipe.enable_xformers_memory_efficient_attention()
+                    logger.info("Enabled xFormers for inpainting")
+                except:
+                    logger.info("xFormers not available for inpainting")
             
-        try:
-            pipe.enable_vae_slicing()
-            logger.info("Enabled VAE slicing for inpainting")
-        except:
-            logger.info("VAE slicing not available for inpainting")
+            if ENABLE_CPU_OFFLOAD:
+                pipe.enable_model_cpu_offload()
+                logger.info("Enabled model CPU offload for inpainting")
+            
+            if ENABLE_ATTENTION_SLICING:
+                try:
+                    pipe.enable_attention_slicing()
+                    logger.info("Enabled attention slicing for inpainting")
+                except:
+                    logger.info("Attention slicing not available for inpainting")
+                
+            if ENABLE_VAE_SLICING:
+                try:
+                    pipe.enable_vae_slicing()
+                    logger.info("Enabled VAE slicing for inpainting")
+                except:
+                    logger.info("VAE slicing not available for inpainting")
         
         logger.info("Inpainting model loaded successfully!")
         print_gpu_usage("(After Inpainting Model Loading)")
@@ -177,15 +276,38 @@ def load_inpainting_model():
 
 # Create FastAPI app
 app = FastAPI(
-    title="Stable Diffusion XL API",
-    description="Image generation API using Stable Diffusion XL with GPU optimizations",
-    version="1.0.0"
+    title="RealVis 5 API",
+    description="Advanced photorealistic image generation API using RealVis 5 model. Local backend for frontend communication.",
+    version="4.0.0",
+    docs_url="/docs" if DEBUG else "/docs",
+    redoc_url="/redoc" if DEBUG else "/redoc"
+)
+
+# Configure CORS
+if ALLOWED_ORIGINS == ["*"]:
+    origins = ["*"]
+else:
+    origins = ALLOWED_ORIGINS
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=ALLOW_CREDENTIALS,
+    allow_methods=ALLOWED_METHODS,
+    allow_headers=ALLOWED_HEADERS if ALLOWED_HEADERS != ["*"] else ["*"],
 )
 
 @app.on_event("startup")
 async def startup_event():
-    """Load both text-to-image and inpainting pipelines at startup."""
+    """Load both RealVis 5 and inpainting pipelines at startup."""
     global pipeline, inpaint_pipeline
+    
+    logger.info("Starting RealVis 5 API...")
+    logger.info(f"Environment: {ENVIRONMENT}")
+    logger.info(f"Debug mode: {DEBUG}")
+    logger.info(f"API Base URL: {API_BASE_URL}")
+    logger.info(f"Authentication: {'Enabled' if API_KEY else 'Disabled'}")
+    logger.info(f"Allowed CORS Origins: {ALLOWED_ORIGINS}")
     
     # Check GPU availability
     if not check_gpu_availability():
@@ -194,19 +316,21 @@ async def startup_event():
     # Initial GPU usage baseline
     print_gpu_usage("(Initial Baseline)")
     
-    # Load text-to-image model
-    pipeline = load_optimized_model()
+    # Load RealVis 5 model
+    pipeline = load_realvis_model()
     if pipeline is None:
-        raise RuntimeError("Failed to load Stable Diffusion XL pipeline")
+        raise RuntimeError("Failed to load RealVis 5 pipeline")
     
     # Load inpainting model
     inpaint_pipeline = load_inpainting_model()
     if inpaint_pipeline is None:
-        raise RuntimeError("Failed to load SD 2.0 inpainting pipeline")
+        logger.warning("Failed to load inpainting pipeline. Inpainting features will be disabled.")
+    
+    logger.info("RealVis 5 API startup completed successfully!")
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint with GPU info."""
+    """Health check endpoint with GPU info and configuration details."""
     gpu_info = {}
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
@@ -222,23 +346,26 @@ async def health_check():
             "memory_usage_percent": round((reserved / total_memory) * 100, 1)
         }
     
-    return {
-        "status": "healthy",
-        "text_to_image_loaded": pipeline is not None,
-        "inpainting_loaded": inpaint_pipeline is not None,
-        "cuda_available": torch.cuda.is_available(),
-        "gpu_info": gpu_info
-    }
+    return HealthResponse(
+        status="healthy",
+        realvis_loaded=pipeline is not None,
+        inpainting_loaded=inpaint_pipeline is not None,
+        cuda_available=torch.cuda.is_available(),
+        gpu_info=gpu_info,
+        api_base_url=API_BASE_URL,
+        api_version="4.0.0",
+        environment=ENVIRONMENT
+    )
 
-@app.post("/generate", response_model=GenerateResponse)
+@app.post("/generate", response_model=GenerateResponse, dependencies=[Depends(verify_api_key)])
 async def generate_image(request: GenerateRequest) -> GenerateResponse:
-    """Generate an image from a text prompt using optimized pipeline."""
+    """Generate a photorealistic image using RealVis 5 model."""
     global pipeline
     
     if pipeline is None:
         raise HTTPException(
             status_code=500,
-            detail="Model not loaded. Please check server logs."
+            detail="RealVis 5 model not loaded. Please check server logs."
         )
     
     prompt = request.prompt.strip()
@@ -247,6 +374,9 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
             status_code=400,
             detail="Prompt cannot be empty."
         )
+    
+    # Use provided negative prompt or default
+    negative_prompt = request.negative_prompt or DEFAULT_NEGATIVE_PROMPT
     
     logger.info(f"Generating image from prompt: '{prompt}'")
     logger.info(f"Parameters: steps={request.num_inference_steps}, guidance={request.guidance_scale}, size={request.width}x{request.height}")
@@ -257,10 +387,11 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
     try:
         start_time = time.time()
         
-        # Generate image with optimization parameters (from generate_image.py approach)
+        # Generate image with RealVis 5 optimized parameters
         with torch.inference_mode():
             result = pipeline(
                 prompt=prompt,
+                negative_prompt=negative_prompt,
                 num_inference_steps=request.num_inference_steps,
                 guidance_scale=request.guidance_scale,
                 height=request.height,
@@ -289,7 +420,9 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
         return GenerateResponse(
             image=img_base64,
             prompt=prompt,
-            generation_time=round(generation_time, 2)
+            negative_prompt=negative_prompt,
+            generation_time=round(generation_time, 2),
+            model_used=REALVIS_MODEL
         )
         
     except Exception as e:
@@ -305,16 +438,17 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
             detail=error_msg
         )
 
-@app.post("/inpaint", response_model=InpaintResponse)
+@app.post("/inpaint", response_model=InpaintResponse, dependencies=[Depends(verify_api_key)])
 async def inpaint_image(
     image: UploadFile = File(...),
     mask: UploadFile = File(...),
     prompt: str = Form(...),
-    num_inference_steps: int = Form(20),
+    negative_prompt: Optional[str] = Form(None),
+    num_inference_steps: int = Form(30),
     guidance_scale: float = Form(8.0),
-    strength: float = Form(0.99)
+    strength: float = Form(0.95)
 ):
-    """Inpaint an image using SDXL inpainting model."""
+    """Inpaint an image using the inpainting model."""
     global inpaint_pipeline
     
     if inpaint_pipeline is None:
@@ -328,6 +462,9 @@ async def inpaint_image(
             status_code=400,
             detail="Prompt cannot be empty."
         )
+    
+    # Use provided negative prompt or default
+    neg_prompt = negative_prompt or DEFAULT_NEGATIVE_PROMPT
     
     logger.info(f"Inpainting with prompt: '{prompt}'")
     logger.info(f"Parameters: steps={num_inference_steps}, guidance={guidance_scale}, strength={strength}")
@@ -351,6 +488,7 @@ async def inpaint_image(
             
             result = inpaint_pipeline(
                 prompt=prompt,
+                negative_prompt=neg_prompt,
                 image=image_pil,
                 mask_image=mask_pil,
                 num_inference_steps=num_inference_steps,
@@ -378,7 +516,9 @@ async def inpaint_image(
         return InpaintResponse(
             image=img_base64,
             prompt=prompt,
-            generation_time=round(generation_time, 2)
+            negative_prompt=neg_prompt,
+            generation_time=round(generation_time, 2),
+            model_used=INPAINTING_MODEL
         )
         
     except Exception as e:
@@ -392,1028 +532,64 @@ async def inpaint_image(
             detail=error_msg
         )
 
-@app.get("/", response_class=HTMLResponse)
-async def web_ui():
-    """Web UI for both text-to-image generation and inpainting."""
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🎨 AI Image Studio</title>
-        <style>
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 20px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                color: white;
-            }
-            .container {
-                background: rgba(255, 255, 255, 0.1);
-                padding: 30px;
-                border-radius: 15px;
-                backdrop-filter: blur(10px);
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            }
-            h1 {
-                text-align: center;
-                margin-bottom: 10px;
-                text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
-            }
-            .subtitle {
-                text-align: center;
-                opacity: 0.9;
-                margin-bottom: 30px;
-            }
-            
-            /* Tab System */
-            .tabs {
-                display: flex;
-                margin-bottom: 30px;
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 10px;
-                padding: 5px;
-            }
-            .tab {
-                flex: 1;
-                padding: 15px;
-                text-align: center;
-                border-radius: 8px;
-                cursor: pointer;
-                transition: all 0.3s;
-                font-weight: bold;
-            }
-            .tab.active {
-                background: linear-gradient(45deg, #ff6b6b, #ee5a24);
-                color: white;
-            }
-            .tab:not(.active):hover {
-                background: rgba(255, 255, 255, 0.1);
-            }
-            
-            .tab-content {
-                display: none;
-            }
-            .tab-content.active {
-                display: block;
-            }
-            
-            /* Common Styles */
-            .form-group {
-                margin-bottom: 20px;
-            }
-            label {
-                display: block;
-                margin-bottom: 8px;
-                font-weight: bold;
-            }
-            input, select, button, textarea {
-                width: 100%;
-                padding: 12px;
-                border: none;
-                border-radius: 8px;
-                font-size: 16px;
-                box-sizing: border-box;
-            }
-            input, select, textarea {
-                background: rgba(255, 255, 255, 0.9);
-                color: #333;
-            }
-            input[type="file"] {
-                background: rgba(255, 255, 255, 0.9);
-                color: #333;
-            }
-            button {
-                background: linear-gradient(45deg, #ff6b6b, #ee5a24);
-                color: white;
-                font-weight: bold;
-                cursor: pointer;
-                transition: transform 0.2s;
-                margin-top: 10px;
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
-            }
-            button:disabled {
-                background: #666;
-                cursor: not-allowed;
-                transform: none;
-            }
-            button.secondary {
-                background: rgba(255, 255, 255, 0.2);
-            }
-            button.active {
-                background: linear-gradient(45deg, #28a745, #20c997);
-            }
-            
-            .grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 15px;
-            }
-            .button-group {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 10px;
-            }
-            
-            /* Advanced Settings */
-            .advanced {
-                display: none;
-                margin-top: 20px;
-                padding: 20px;
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 8px;
-            }
-            .advanced.show {
-                display: block;
-            }
-            .toggle-advanced {
-                background: rgba(255, 255, 255, 0.2);
-                color: white;
-                margin-bottom: 20px;
-            }
-            
-                         /* Inpainting Specific */
-             .workspace {
-                 display: grid;
-                 grid-template-columns: 1fr;
-                 gap: 20px;
-                 margin: 20px 0;
-                 justify-items: center;
-             }
-            .canvas-container {
-                background: rgba(255, 255, 255, 0.9);
-                border-radius: 10px;
-                padding: 15px;
-                text-align: center;
-            }
-            .canvas-container h3 {
-                color: #333;
-                margin: 0 0 15px 0;
-            }
-                         canvas {
-                 border: 2px solid #ddd;
-                 border-radius: 5px;
-                 background: white;
-                 max-width: 100%;
-             }
-             #maskCanvas {
-                 cursor: crosshair;
-                 background: transparent;
-                 border: none;
-             }
-            .upload-area {
-                border: 3px dashed rgba(255, 255, 255, 0.5);
-                border-radius: 10px;
-                padding: 30px;
-                text-align: center;
-                cursor: pointer;
-                transition: all 0.3s;
-                margin-bottom: 20px;
-            }
-            .upload-area:hover {
-                border-color: rgba(255, 255, 255, 0.8);
-                background: rgba(255, 255, 255, 0.05);
-            }
-            .upload-area.dragover {
-                border-color: #ffc107;
-                background: rgba(255, 193, 7, 0.1);
-            }
-            .brush-size {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            .brush-size input[type="range"] {
-                flex: 1;
-                padding: 0;
-            }
-            .brush-size span {
-                min-width: 50px;
-                font-weight: bold;
-                background: rgba(255, 255, 255, 0.2);
-                padding: 8px 12px;
-                border-radius: 5px;
-                text-align: center;
-            }
-            
-            /* Results */
-            .result {
-                margin-top: 30px;
-                text-align: center;
-            }
-            .result img {
-                max-width: 100%;
-                border-radius: 10px;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-                margin: 20px 0;
-            }
-            
-            /* Status Messages */
-            .status {
-                padding: 15px;
-                border-radius: 8px;
-                margin: 10px 0;
-                text-align: center;
-            }
-            .status.loading {
-                background: rgba(255, 193, 7, 0.3);
-                border: 2px solid #ffc107;
-            }
-            .status.success {
-                background: rgba(40, 167, 69, 0.3);
-                border: 2px solid #28a745;
-            }
-            .status.error {
-                background: rgba(220, 53, 69, 0.3);
-                border: 2px solid #dc3545;
-            }
-            
-            .api-info {
-                background: rgba(255, 255, 255, 0.05);
-                padding: 15px;
-                border-radius: 8px;
-                margin-top: 20px;
-                font-size: 14px;
-            }
-            
-            @media (max-width: 768px) {
-                .workspace {
-                    grid-template-columns: 1fr;
-                }
-                .grid {
-                    grid-template-columns: 1fr;
-                }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🎨 AI Image Studio</h1>
-            <p class="subtitle">SDXL Text-to-Image + SD 2.0 Inpainting</p>
-            
-            <!-- Tab Navigation -->
-            <div class="tabs">
-                <div class="tab active" onclick="switchTab('generate')">
-                    🖼️ Text-to-Image
-                </div>
-                <div class="tab" onclick="switchTab('inpaint')">
-                    🎯 Inpainting
-                </div>
-            </div>
-            
-            <!-- Text-to-Image Tab -->
-            <div id="generateTab" class="tab-content active">
-                <form id="generateForm">
-                    <div class="form-group">
-                        <label for="prompt">✨ Enter your prompt:</label>
-                        <input 
-                            type="text" 
-                            id="prompt" 
-                            placeholder="e.g., a majestic dragon flying over a cyberpunk city at sunset"
-                            required
-                        >
-                    </div>
-                    
-                    <button type="button" class="toggle-advanced" onclick="toggleAdvanced('generateAdvanced')">
-                        ⚙️ Advanced Settings
-                    </button>
-                    
-                    <div id="generateAdvanced" class="advanced">
-                        <div class="grid">
-                            <div class="form-group">
-                                <label for="steps">Inference Steps:</label>
-                                <select id="steps">
-                                    <option value="15">15 (Fast)</option>
-                                    <option value="20" selected>20 (Balanced)</option>
-                                    <option value="30">30 (Quality)</option>
-                                    <option value="50">50 (High Quality)</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="guidance">Guidance Scale:</label>
-                                <select id="guidance">
-                                    <option value="5.0">5.0 (Creative)</option>
-                                    <option value="7.5" selected>7.5 (Balanced)</option>
-                                    <option value="10.0">10.0 (Strict)</option>
-                                    <option value="15.0">15.0 (Very Strict)</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="width">Width:</label>
-                                <select id="width">
-                                    <option value="512">512px</option>
-                                    <option value="768">768px</option>
-                                    <option value="1024" selected>1024px</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="height">Height:</label>
-                                <select id="height">
-                                    <option value="512">512px</option>
-                                    <option value="768">768px</option>
-                                    <option value="1024" selected>1024px</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <button type="submit" id="generateBtn">
-                        🚀 Generate Image
-                    </button>
-                </form>
-            </div>
-            
-            <!-- Inpainting Tab -->
-            <div id="inpaintTab" class="tab-content">
-                <!-- Upload Area -->
-                <div class="upload-area" id="uploadArea">
-                    <p>📁 Click or drag an image here to start inpainting</p>
-                    <input type="file" id="imageInput" accept="image/*" style="display: none;">
-                </div>
-                
-                <!-- Workspace -->
-                <div class="workspace" id="workspace" style="display: none;">
-                    <!-- Single Canvas with Image + Mask Overlay -->
-                    <div class="canvas-container" style="grid-column: span 2;">
-                        <h3>🎨 Draw on the image to mark areas you want to regenerate</h3>
-                        <div style="position: relative; display: inline-block;">
-                            <canvas id="imageCanvas"></canvas>
-                            <canvas id="maskCanvas" style="position: absolute; top: 0; left: 0; pointer-events: auto;"></canvas>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Inpainting Controls -->
-                <div id="inpaintControls" style="display: none;">
-                    <div class="form-group">
-                        <label>🖌️ Drawing Tools:</label>
-                        <div class="button-group">
-                            <button type="button" id="brushTool" class="active">🖌️ Brush</button>
-                            <button type="button" id="eraserTool">🧹 Eraser</button>
-                        </div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label>📏 Brush Size:</label>
-                        <div class="brush-size">
-                            <input type="range" id="brushSize" min="5" max="50" value="20">
-                            <span id="brushSizeValue">20px</span>
-                        </div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="inpaintPrompt">✨ Inpainting Prompt:</label>
-                        <textarea id="inpaintPrompt" rows="3" placeholder="Be very specific! e.g., 'a red baseball cap with white logo sitting on the dog's head' or 'a blue collar with silver buckle around the dog's neck'"></textarea>
-                    </div>
-                    
-                    <button type="button" class="toggle-advanced" onclick="toggleAdvanced('inpaintAdvanced')">
-                        ⚙️ Advanced Settings
-                    </button>
-                    
-                    <div id="inpaintAdvanced" class="advanced">
-                        <div class="grid">
-                            <div class="form-group">
-                                <label for="inpaintSteps">Inference Steps:</label>
-                                <select id="inpaintSteps">
-                                    <option value="20">20 (Fast)</option>
-                                    <option value="30">30 (Balanced)</option>
-                                    <option value="50" selected>50 (High Quality)</option>
-                                    <option value="75">75 (Max Quality)</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="inpaintGuidance">Guidance Scale:</label>
-                                <select id="inpaintGuidance">
-                                    <option value="7.5" selected>7.5 (Balanced)</option>
-                                    <option value="10.0">10.0 (Strict)</option>
-                                    <option value="12.0">12.0 (Very Strict)</option>
-                                    <option value="15.0">15.0 (Maximum)</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="inpaintStrength">Strength (how much to change):</label>
-                                <select id="inpaintStrength">
-                                    <option value="0.7">0.7 (Subtle)</option>
-                                    <option value="0.8">0.8 (Moderate)</option>
-                                    <option value="0.9">0.9 (Strong)</option>
-                                    <option value="0.95" selected>0.95 (Very Strong)</option>
-                                    <option value="1.0">1.0 (Maximum)</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="button-group">
-                        <button type="button" id="clearMask" class="secondary">🗑️ Clear Mask</button>
-                        <button type="button" id="newImage" class="secondary">📁 New Image</button>
-                    </div>
-                    
-                    <div class="button-group" id="debugButtons" style="display: none;">
-                        <button type="button" id="downloadImage" class="secondary">📥 Download Image</button>
-                        <button type="button" id="downloadMask" class="secondary">📥 Download Mask</button>
-                    </div>
-                    
-                    <div id="maskPreview" style="display: none; margin: 20px 0;">
-                        <h4 style="color: white; text-align: center;">🔍 Mask Preview (Black/White)</h4>
-                        <p style="color: white; text-align: center; font-size: 14px; opacity: 0.8; margin: 10px 0;">
-                            White areas = what will be regenerated | Black areas = what stays the same
-                        </p>
-                        <div style="text-align: center;">
-                            <canvas id="previewCanvas" style="border: 2px solid #ddd; border-radius: 5px; max-width: 200px; background: white;"></canvas>
-                        </div>
-                        <p style="color: white; text-align: center; font-size: 12px; opacity: 0.7; margin-top: 10px;">
-                            Use download buttons below to inspect what's sent to the API
-                        </p>
-                    </div>
-                    
-                    <button type="button" id="inpaintBtn">
-                        🎯 Start Inpainting
-                    </button>
-                </div>
-            </div>
-            
-            <!-- Results -->
-            <div class="result" id="result"></div>
-            
-            <!-- API Info -->
-            <div class="api-info">
-                <strong>📊 API Endpoints:</strong><br>
-                • <a href="/health" style="color: #ffc107;">/health</a> - Check server status<br>
-                • <a href="/docs" style="color: #ffc107;">/docs</a> - API documentation<br>
-                • POST /generate - Generate images<br>
-                • POST /inpaint - Inpaint images
-            </div>
-        </div>
-
-        <script>
-            // Global variables
-            let currentTab = 'generate';
-            let isProcessing = false;
-            
-                         // Inpainting variables
-             let imageCanvas, maskCanvas, imageCtx, maskCtx;
-             let isDrawing = false;
-             let currentTool = 'brush';
-             let brushSize = 20;
-             let uploadedImageFile = null;
-            
-            // Initialize
-            document.addEventListener('DOMContentLoaded', function() {
-                setupEventListeners();
-                setupCanvas();
-                checkServerHealth();
-            });
-            
-            // Tab Management
-            function switchTab(tabName) {
-                currentTab = tabName;
-                
-                // Update tab buttons
-                document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-                event.target.classList.add('active');
-                
-                // Update tab content
-                document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-                document.getElementById(tabName + 'Tab').classList.add('active');
-            }
-            
-            function toggleAdvanced(elementId) {
-                const advanced = document.getElementById(elementId);
-                advanced.classList.toggle('show');
-            }
-            
-            // Text-to-Image Generation
-            function setupEventListeners() {
-                // Text-to-image form
-                document.getElementById('generateForm').addEventListener('submit', handleGenerate);
-                
-                // Inpainting upload
-                const uploadArea = document.getElementById('uploadArea');
-                const imageInput = document.getElementById('imageInput');
-                
-                uploadArea.addEventListener('click', () => imageInput.click());
-                uploadArea.addEventListener('dragover', handleDragOver);
-                uploadArea.addEventListener('drop', handleDrop);
-                imageInput.addEventListener('change', handleImageSelect);
-                
-                // Inpainting tools
-                document.getElementById('brushTool').addEventListener('click', () => setTool('brush'));
-                document.getElementById('eraserTool').addEventListener('click', () => setTool('eraser'));
-                document.getElementById('brushSize').addEventListener('input', updateBrushSize);
-                document.getElementById('clearMask').addEventListener('click', clearMask);
-                document.getElementById('newImage').addEventListener('click', resetInpainting);
-                document.getElementById('inpaintBtn').addEventListener('click', handleInpaint);
-                
-                // Debug buttons
-                document.getElementById('downloadImage').addEventListener('click', downloadImage);
-                document.getElementById('downloadMask').addEventListener('click', downloadMask);
-            }
-            
-            async function handleGenerate(e) {
-                e.preventDefault();
-                
-                if (isProcessing) return;
-                
-                const prompt = document.getElementById('prompt').value.trim();
-                if (!prompt) {
-                    showStatus('Please enter a prompt', 'error');
-                    return;
-                }
-                
-                isProcessing = true;
-                const generateBtn = document.getElementById('generateBtn');
-                generateBtn.disabled = true;
-                generateBtn.textContent = '⏳ Generating...';
-                
-                showStatus('🎨 Generating your image... This may take 20-60 seconds.', 'loading');
-                
-                const requestBody = {
-                    prompt: prompt,
-                    num_inference_steps: parseInt(document.getElementById('steps').value),
-                    guidance_scale: parseFloat(document.getElementById('guidance').value),
-                    width: parseInt(document.getElementById('width').value),
-                    height: parseInt(document.getElementById('height').value)
-                };
-                
-                try {
-                    const startTime = Date.now();
-                    
-                    const response = await fetch('/generate', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(requestBody)
-                    });
-                    
-                    if (!response.ok) {
-                        const errorData = await response.json();
-                        throw new Error(errorData.detail || 'Generation failed');
-                    }
-                    
-                    const data = await response.json();
-                    const totalTime = Date.now() - startTime;
-                    
-                    showResult(data.image, data.prompt, data.generation_time, totalTime);
-                    showStatus(`✅ Image generated successfully in ${data.generation_time}s`, 'success');
-                    
-                } catch (error) {
-                    console.error('Error:', error);
-                    showStatus(`❌ Error: ${error.message}`, 'error');
-                } finally {
-                    isProcessing = false;
-                    generateBtn.disabled = false;
-                    generateBtn.textContent = '🚀 Generate Image';
-                }
-            }
-            
-                         // Inpainting Functions
-             function setupCanvas() {
-                 imageCanvas = document.getElementById('imageCanvas');
-                 maskCanvas = document.getElementById('maskCanvas');
-                 imageCtx = imageCanvas.getContext('2d');
-                 maskCtx = maskCanvas.getContext('2d');
-                 
-                 // Mask canvas drawing events (overlay canvas)
-                 maskCanvas.addEventListener('mousedown', startDrawing);
-                 maskCanvas.addEventListener('mousemove', draw);
-                 maskCanvas.addEventListener('mouseup', stopDrawing);
-                 maskCanvas.addEventListener('mouseout', stopDrawing);
-                 
-                 // Touch events for mobile
-                 maskCanvas.addEventListener('touchstart', handleTouch);
-                 maskCanvas.addEventListener('touchmove', handleTouch);
-                 maskCanvas.addEventListener('touchend', stopDrawing);
-             }
-            
-            function handleDragOver(e) {
-                e.preventDefault();
-                e.currentTarget.classList.add('dragover');
-            }
-            
-            function handleDrop(e) {
-                e.preventDefault();
-                e.currentTarget.classList.remove('dragover');
-                const files = e.dataTransfer.files;
-                if (files.length > 0) {
-                    loadImage(files[0]);
-                }
-            }
-            
-            function handleImageSelect(e) {
-                const files = e.target.files;
-                if (files.length > 0) {
-                    loadImage(files[0]);
-                }
-            }
-            
-            function loadImage(file) {
-                if (!file.type.startsWith('image/')) {
-                    showStatus('Please select a valid image file', 'error');
-                    return;
-                }
-                
-                uploadedImageFile = file;
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    const img = new Image();
-                    img.onload = function() {
-                        setupImageCanvas(img);
-                    };
-                    img.src = e.target.result;
-                };
-                reader.readAsDataURL(file);
-            }
-            
-                         function setupImageCanvas(img) {
-                 // Calculate canvas size (max 512px while maintaining aspect ratio for SD 2.0)
-                 const maxSize = 512;
-                 let canvasWidth = img.width;
-                 let canvasHeight = img.height;
-                 
-                 if (img.width > maxSize || img.height > maxSize) {
-                     const ratio = Math.min(maxSize / img.width, maxSize / img.height);
-                     canvasWidth = img.width * ratio;
-                     canvasHeight = img.height * ratio;
-                 }
-                 
-                 // Set both canvas dimensions to match
-                 imageCanvas.width = canvasWidth;
-                 imageCanvas.height = canvasHeight;
-                 maskCanvas.width = canvasWidth;
-                 maskCanvas.height = canvasHeight;
-                 
-                 // Draw original image on background canvas
-                 imageCtx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
-                 
-                 // Clear mask canvas and make it transparent
-                 maskCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-                 
-                                 // Show workspace and tools
-                document.getElementById('uploadArea').style.display = 'none';
-                document.getElementById('workspace').style.display = 'grid';
-                document.getElementById('inpaintControls').style.display = 'block';
-                document.getElementById('debugButtons').style.display = 'grid';
-                document.getElementById('maskPreview').style.display = 'block';
-                
-                // Initialize mask preview
-                updateMaskPreview();
-                
-                showStatus('✅ Image loaded! Draw red areas to mark what you want to regenerate', 'success');
-             }
-            
-            function setTool(tool) {
-                currentTool = tool;
-                document.getElementById('brushTool').classList.toggle('active', tool === 'brush');
-                document.getElementById('eraserTool').classList.toggle('active', tool === 'eraser');
-                
-                maskCanvas.style.cursor = tool === 'brush' ? 'crosshair' : 'grab';
-            }
-            
-            function updateBrushSize() {
-                brushSize = document.getElementById('brushSize').value;
-                document.getElementById('brushSizeValue').textContent = brushSize + 'px';
-            }
-            
-            function getMousePos(e) {
-                const rect = maskCanvas.getBoundingClientRect();
-                return {
-                    x: (e.clientX - rect.left) * (maskCanvas.width / rect.width),
-                    y: (e.clientY - rect.top) * (maskCanvas.height / rect.height)
-                };
-            }
-            
-            function startDrawing(e) {
-                isDrawing = true;
-                const pos = getMousePos(e);
-                drawOnMask(pos.x, pos.y);
-            }
-            
-            function draw(e) {
-                if (!isDrawing) return;
-                const pos = getMousePos(e);
-                drawOnMask(pos.x, pos.y);
-            }
-            
-            function stopDrawing() {
-                isDrawing = false;
-            }
-            
-            function handleTouch(e) {
-                e.preventDefault();
-                const touch = e.touches[0];
-                const mouseEvent = new MouseEvent(e.type === 'touchstart' ? 'mousedown' : 'mousemove', {
-                    clientX: touch.clientX,
-                    clientY: touch.clientY
-                });
-                maskCanvas.dispatchEvent(mouseEvent);
-            }
-            
-                                     function drawOnMask(x, y) {
-                if (currentTool === 'brush') {
-                    maskCtx.globalCompositeOperation = 'source-over';
-                    maskCtx.fillStyle = 'rgba(255, 0, 0, 0.5)'; // Semi-transparent red
-                } else {
-                    maskCtx.globalCompositeOperation = 'destination-out'; // Eraser
-                }
-                
-                maskCtx.beginPath();
-                maskCtx.arc(x, y, brushSize / 2, 0, 2 * Math.PI);
-                maskCtx.fill();
-                
-                // Update mask preview
-                updateMaskPreview();
-            }
-            
-                                     function clearMask() {
-                maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-                updateMaskPreview();
-                showStatus('🗑️ Mask cleared', 'success');
-            }
-            
-            function resetInpainting() {
-                document.getElementById('uploadArea').style.display = 'block';
-                document.getElementById('workspace').style.display = 'none';
-                document.getElementById('inpaintControls').style.display = 'none';
-                document.getElementById('debugButtons').style.display = 'none';
-                document.getElementById('maskPreview').style.display = 'none';
-                document.getElementById('result').innerHTML = '';
-                document.getElementById('imageInput').value = '';
-                uploadedImageFile = null;
-            }
-            
-            async function handleInpaint() {
-                const prompt = document.getElementById('inpaintPrompt').value.trim();
-                if (!prompt) {
-                    showStatus('Please enter a prompt describing what you want to generate', 'error');
-                    return;
-                }
-                
-                if (!uploadedImageFile) {
-                    showStatus('Please upload an image first', 'error');
-                    return;
-                }
-                
-                                 // Check if mask has any red areas
-                 const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-                 const hasRedPixels = Array.from(imageData.data).some((pixel, index) => 
-                     index % 4 === 3 && pixel > 0 // Check alpha channel for drawn areas
-                 );
-                 
-                 if (!hasRedPixels) {
-                     showStatus('Please paint some red areas on the mask to indicate what to regenerate', 'error');
-                     return;
-                 }
-                
-                isProcessing = true;
-                const inpaintBtn = document.getElementById('inpaintBtn');
-                inpaintBtn.disabled = true;
-                inpaintBtn.textContent = '⏳ Inpainting...';
-                
-                showStatus('🎨 Starting inpainting... This may take 30-60 seconds', 'loading');
-                
-                                 try {
-                     const startTime = Date.now();
-                     
-                     // Convert red overlay to black/white mask
-                     const bwMaskCanvas = createBlackWhiteMask();
-                     const maskBlob = await canvasToBlob(bwMaskCanvas);
-                    
-                    // Create FormData
-                    const formData = new FormData();
-                    formData.append('image', uploadedImageFile);
-                    formData.append('mask', maskBlob, 'mask.png');
-                    formData.append('prompt', prompt);
-                    formData.append('num_inference_steps', document.getElementById('inpaintSteps').value);
-                    formData.append('guidance_scale', document.getElementById('inpaintGuidance').value);
-                    formData.append('strength', document.getElementById('inpaintStrength').value);
-                    
-                    const response = await fetch('/inpaint', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    if (!response.ok) {
-                        const error = await response.json();
-                        throw new Error(error.detail || 'Inpainting failed');
-                    }
-                    
-                    const data = await response.json();
-                    const totalTime = Date.now() - startTime;
-                    
-                    showResult(data.image, data.prompt, data.generation_time, totalTime);
-                    showStatus('✅ Inpainting completed successfully!', 'success');
-                    
-                } catch (error) {
-                    console.error('Error:', error);
-                    showStatus(`❌ Error: ${error.message}`, 'error');
-                } finally {
-                    isProcessing = false;
-                    inpaintBtn.disabled = false;
-                    inpaintBtn.textContent = '🎯 Start Inpainting';
-                }
-            }
-            
-                         function createBlackWhiteMask() {
-                 // Create a temporary canvas for black/white mask
-                 const tempCanvas = document.createElement('canvas');
-                 tempCanvas.width = maskCanvas.width;
-                 tempCanvas.height = maskCanvas.height;
-                 const tempCtx = tempCanvas.getContext('2d');
-                 
-                 // Fill with black background
-                 tempCtx.fillStyle = 'black';
-                 tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-                 
-                 // Get the red overlay data
-                 const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-                 const data = imageData.data;
-                 
-                 // Create white areas where red was drawn
-                 for (let i = 0; i < data.length; i += 4) {
-                     if (data[i + 3] > 0) { // If alpha > 0 (red was drawn)
-                         const x = (i / 4) % maskCanvas.width;
-                         const y = Math.floor(i / 4 / maskCanvas.width);
-                         
-                         tempCtx.fillStyle = 'white';
-                         tempCtx.fillRect(x, y, 1, 1);
-                     }
-                 }
-                 
-                 return tempCanvas;
-             }
-             
-                         function canvasToBlob(canvas) {
-                return new Promise(resolve => {
-                    canvas.toBlob(resolve, 'image/png');
-                });
-            }
-            
-            // Debug Functions
-            function updateMaskPreview() {
-                if (!maskCanvas) return;
-                
-                const previewCanvas = document.getElementById('previewCanvas');
-                const previewCtx = previewCanvas.getContext('2d');
-                
-                // Set preview canvas size (small version)
-                const scale = 200 / Math.max(maskCanvas.width, maskCanvas.height);
-                previewCanvas.width = maskCanvas.width * scale;
-                previewCanvas.height = maskCanvas.height * scale;
-                
-                // Create and draw the black/white mask
-                const bwMask = createBlackWhiteMask();
-                previewCtx.drawImage(bwMask, 0, 0, previewCanvas.width, previewCanvas.height);
-            }
-            
-            function downloadImage() {
-                if (!imageCanvas) {
-                    showStatus('No image to download', 'error');
-                    return;
-                }
-                
-                imageCanvas.toBlob(blob => {
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `processed_image_${Date.now()}.png`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    showStatus('📥 Image downloaded', 'success');
-                }, 'image/png');
-            }
-            
-            function downloadMask() {
-                if (!maskCanvas) {
-                    showStatus('No mask to download', 'error');
-                    return;
-                }
-                
-                const bwMask = createBlackWhiteMask();
-                bwMask.toBlob(blob => {
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `mask_${Date.now()}.png`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    showStatus('📥 Mask downloaded', 'success');
-                }, 'image/png');
-            }
-            
-            // Utility Functions
-            function showStatus(message, type) {
-                const result = document.getElementById('result');
-                const statusDiv = document.createElement('div');
-                statusDiv.className = `status ${type}`;
-                statusDiv.textContent = message;
-                
-                // Remove previous status
-                const existingStatus = result.querySelector('.status');
-                if (existingStatus) {
-                    existingStatus.remove();
-                }
-                
-                result.insertBefore(statusDiv, result.firstChild);
-            }
-            
-            function showResult(base64Image, prompt, generationTime, totalTime) {
-                const result = document.getElementById('result');
-                
-                // Remove previous image
-                const existingImage = result.querySelector('img');
-                if (existingImage) {
-                    existingImage.remove();
-                }
-                
-                const img = document.createElement('img');
-                img.src = `data:image/png;base64,${base64Image}`;
-                img.alt = 'Generated Image';
-                
-                const info = document.createElement('div');
-                info.innerHTML = `
-                    <strong>📝 Prompt:</strong> ${prompt}<br>
-                    <strong>⏱️ Generation Time:</strong> ${generationTime}s<br>
-                    <strong>🌐 Total Request Time:</strong> ${(totalTime/1000).toFixed(2)}s
-                `;
-                info.style.marginTop = '15px';
-                info.style.background = 'rgba(255, 255, 255, 0.1)';
-                info.style.padding = '15px';
-                info.style.borderRadius = '8px';
-                
-                result.appendChild(img);
-                result.appendChild(info);
-            }
-            
-            async function checkServerHealth() {
-                try {
-                    const response = await fetch('/health');
-                    const data = await response.json();
-                    
-                                         if (data.status === 'healthy' && data.text_to_image_loaded && data.inpainting_loaded) {
-                         showStatus('🟢 Server is healthy - SDXL + SD 2.0 Inpainting loaded', 'success');
-                     } else if (data.status === 'healthy' && data.text_to_image_loaded) {
-                         showStatus('🟡 SDXL ready, SD 2.0 Inpainting loading...', 'loading');
-                    } else {
-                        showStatus('🟡 Server responding but models may not be loaded', 'error');
-                    }
-                } catch (error) {
-                    showStatus('🔴 Cannot connect to server', 'error');
-                }
-            }
-        </script>
-    </body>
-    </html>
-    """
-
 @app.get("/api")
 async def api_info():
     """API information endpoint."""
     return {
-        "message": "Stable Diffusion XL API with GPU Optimizations",
-        "version": "1.0.0",
+        "message": "RealVis 5 API - Advanced Photorealistic Image Generation",
+        "version": "4.0.0",
+        "mode": "local_execution",
+        "api_base_url": API_BASE_URL,
+        "environment": ENVIRONMENT,
+        "authentication": "enabled" if API_KEY else "disabled",
         "endpoints": {
-            "generate": "POST /generate - Generate image from prompt",
-            "inpaint": "POST /inpaint - Inpaint masked areas of an image",
+            "generate": "POST /generate - Generate photorealistic images",
+            "inpaint": "POST /inpaint - Inpaint masked areas of images",
             "health": "GET /health - Health check with GPU info",
-            "docs": "GET /docs - API documentation",
-            "web": "GET / - Web UI interface"
+            "docs": "GET /docs - Interactive API documentation",
+            "redoc": "GET /redoc - Alternative API documentation"
         },
-                "models": {
-            "text_to_image": "stabilityai/stable-diffusion-xl-base-1.0",
-            "inpainting": "stabilityai/stable-diffusion-2-inpainting"
+        "models": {
+            "realvis": REALVIS_MODEL,
+            "inpainting": INPAINTING_MODEL
         },
-        "optimizations": [
-            "xformers memory efficient attention",
-            "model CPU offload", 
-            "attention slicing",
-            "VAE slicing",
-            "GPU cache clearing"
-        ]
+        "features": [
+            "RealVis 5 photorealistic generation",
+            "Advanced inpainting capabilities",
+            "GPU memory optimizations",
+            "API key authentication",
+            "CORS support for frontends",
+            "Comprehensive error handling"
+        ],
+        "optimizations": {
+            "gpu_optimizations": ENABLE_GPU_OPTIMIZATIONS,
+            "xformers": ENABLE_XFORMERS,
+            "cpu_offload": ENABLE_CPU_OFFLOAD,
+            "attention_slicing": ENABLE_ATTENTION_SLICING,
+            "vae_slicing": ENABLE_VAE_SLICING
+        }
+    }
+
+@app.get("/")
+async def root():
+    """Root endpoint with API information."""
+    return {
+        "message": "RealVis 5 API - Advanced Photorealistic Image Generation",
+        "version": "4.0.0",
+        "api_base_url": API_BASE_URL,
+        "environment": ENVIRONMENT,
+        "mode": "local_execution",
+        "documentation": "/docs",
+        "api_info": "/api",
+        "health_check": "/health"
     }
 
 if __name__ == "__main__":
     # Run the app with uvicorn
     uvicorn.run(
         "app:app",
-        host="0.0.0.0",
-        port=8000,
-        log_level="info",
-        reload=False  # Set to True for development
+        host=HOST,
+        port=PORT,
+        log_level=LOG_LEVEL.lower(),
+        reload=DEBUG
     ) 
