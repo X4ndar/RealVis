@@ -43,7 +43,7 @@ Edit your `.env` file:
 
 ```env
 # Your RunPod API endpoint
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net
 
 # Optional proxy authentication
 API_KEY=your-secure-proxy-key
@@ -81,7 +81,7 @@ Your proxy will be available at `http://0.0.0.0:8000`
 ### External API Settings
 ```env
 # Your external RunPod API
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net
 EXTERNAL_API_TIMEOUT=300
 
 # Proxy server
@@ -208,7 +208,7 @@ API_KEY=                    # No proxy auth
 ALLOWED_ORIGINS=*           # Allow all origins  
 DEBUG=true                  # Hot reload
 LOG_LEVEL=DEBUG            # Verbose logging
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net
 ```
 
 ### Production Setup
@@ -217,7 +217,7 @@ API_KEY=super-secure-key    # Enable proxy auth
 ALLOWED_ORIGINS=https://yourdomain.com  # Restrict origins
 DEBUG=false                 # Production mode
 LOG_LEVEL=INFO             # Standard logging
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net
 ```
 
 ### Multi-Environment

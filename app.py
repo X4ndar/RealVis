@@ -10,6 +10,7 @@ import io
 import torch
 import time
 import os
+import re
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends, Security
@@ -43,7 +44,7 @@ ALLOW_CREDENTIALS = os.getenv("ALLOW_CREDENTIALS", "true").lower() == "true"
 
 # Model Configuration
 REALVIS_MODEL = os.getenv("REALVIS_MODEL", "GraydientPlatformAPI/realvis5light-xl")
-INPAINTING_MODEL = os.getenv("INPAINTING_MODEL", "stabilityai/stable-diffusion-2-inpainting")
+INPAINTING_MODEL = os.getenv("INPAINTING_MODEL", "diffusers/stable-diffusion-xl-1.0-inpainting-0.1")
 MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR")
 
 # Generation Defaults & Limits
@@ -52,6 +53,11 @@ DEFAULT_GUIDANCE_SCALE = float(os.getenv("DEFAULT_GUIDANCE_SCALE", "2.0"))
 DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
 DEFAULT_NEGATIVE_PROMPT = os.getenv("DEFAULT_NEGATIVE_PROMPT", "cartoon, anime, painted, artificial, low quality, blurry, distorted")
+
+# Inpainting Specific Defaults
+DEFAULT_INPAINT_STEPS = int(os.getenv("DEFAULT_INPAINT_STEPS", "30"))
+DEFAULT_INPAINT_GUIDANCE = float(os.getenv("DEFAULT_INPAINT_GUIDANCE", "8.0"))
+DEFAULT_INPAINT_STRENGTH = float(os.getenv("DEFAULT_INPAINT_STRENGTH", "0.85"))  # Increased for SDXL
 
 MAX_STEPS = int(os.getenv("MAX_STEPS", "50"))
 MAX_WIDTH = int(os.getenv("MAX_WIDTH", "1536"))
@@ -72,7 +78,11 @@ LOG_FORMAT = os.getenv("LOG_FORMAT", "%(asctime)s - %(name)s - %(levelname)s - %
 LOG_GPU_MEMORY = os.getenv("LOG_GPU_MEMORY", "true").lower() == "true"
 
 # Deployment URLs
-API_BASE_URL = os.getenv("API_BASE_URL", "https://do9n3s330iext0-8000.proxy.runpod.net")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://zfg8pskxajc6tg-8000.proxy.runpod.net")
+
+# Image Saving Configuration
+SAVE_GENERATED_IMAGES = os.getenv("SAVE_GENERATED_IMAGES", "true").lower() == "true"
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "generated_images")
 
 # Configure logging
 logging.basicConfig(
@@ -99,13 +109,14 @@ class GenerateResponse(BaseModel):
     negative_prompt: Optional[str] = Field(..., description="Negative prompt used")
     generation_time: float = Field(..., description="Time taken for generation in seconds")
     model_used: str = Field(..., description="Model used for generation")
+    saved_path: Optional[str] = Field(None, description="Local path where image was saved")
 
 class InpaintRequest(BaseModel):
     prompt: str = Field(..., description="Text prompt for inpainting")
     negative_prompt: Optional[str] = Field(default=None, description="Negative prompt to avoid unwanted elements")
-    num_inference_steps: int = Field(default=30, ge=1, le=MAX_STEPS, description="Number of inference steps")
-    guidance_scale: float = Field(default=8.0, ge=0.1, le=20.0, description="Guidance scale for prompt adherence")
-    strength: float = Field(default=0.95, ge=0.1, le=1.0, description="Inpainting strength")
+    num_inference_steps: int = Field(default=DEFAULT_INPAINT_STEPS, ge=1, le=MAX_STEPS, description="Number of inference steps")
+    guidance_scale: float = Field(default=DEFAULT_INPAINT_GUIDANCE, ge=0.1, le=20.0, description="Guidance scale for prompt adherence")
+    strength: float = Field(default=DEFAULT_INPAINT_STRENGTH, ge=0.1, le=1.0, description="Inpainting strength")
 
 class InpaintResponse(BaseModel):
     image: str = Field(..., description="Base64 encoded inpainted image")
@@ -113,6 +124,8 @@ class InpaintResponse(BaseModel):
     negative_prompt: Optional[str] = Field(..., description="Negative prompt used")
     generation_time: float = Field(..., description="Time taken for inpainting in seconds")
     model_used: str = Field(..., description="Model used for inpainting")
+    saved_path: Optional[str] = Field(None, description="Local path where image was saved")
+    mask_saved_path: Optional[str] = Field(None, description="Local path where mask was saved")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="Server health status")
@@ -123,6 +136,84 @@ class HealthResponse(BaseModel):
     api_base_url: str = Field(..., description="API base URL")
     api_version: str = Field(..., description="API version")
     environment: str = Field(..., description="Deployment environment")
+
+def sanitize_filename(text: str, max_length: int = 50) -> str:
+    """Sanitize text to be safe for use in filenames."""
+    # Remove or replace unsafe characters
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', text)
+    # Remove extra spaces and replace with underscores
+    sanitized = re.sub(r'\s+', '_', sanitized)
+    # Limit length
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+    # Remove trailing dots or spaces
+    sanitized = sanitized.rstrip('. ')
+    return sanitized or "untitled"
+
+def ensure_output_directory():
+    """Create the output directory if it doesn't exist."""
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+        logger.info(f"Created output directory: {OUTPUT_DIR}")
+
+def save_generated_image(image: Image.Image, prompt: str, image_type: str = "generate", 
+                        generation_time: float = 0, additional_info: Optional[dict] = None) -> Optional[str]:
+    """
+    Save generated image to local filesystem.
+    
+    Args:
+        image: PIL Image object to save
+        prompt: Text prompt used for generation
+        image_type: Type of generation ("generate" or "inpaint")
+        generation_time: Time taken for generation
+        additional_info: Additional parameters (steps, guidance, etc.)
+    
+    Returns:
+        Path to saved image or None if saving is disabled/failed
+    """
+    if not SAVE_GENERATED_IMAGES:
+        return None
+    
+    try:
+        ensure_output_directory()
+        
+        # Create timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Sanitize prompt for filename
+        safe_prompt = sanitize_filename(prompt)
+        
+        # Create filename
+        filename = f"{timestamp}_{image_type}_{safe_prompt}.png"
+        filepath = os.path.join(OUTPUT_DIR, filename)
+        
+        # Save image
+        image.save(filepath, "PNG")
+        
+        # Create accompanying info file
+        info_filepath = os.path.join(OUTPUT_DIR, f"{timestamp}_{image_type}_{safe_prompt}_info.txt")
+        with open(info_filepath, 'w', encoding='utf-8') as f:
+            f.write(f"Generated Image Information\n")
+            f.write(f"========================\n\n")
+            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Type: {image_type}\n")
+            f.write(f"Prompt: {prompt}\n")
+            f.write(f"Generation Time: {generation_time:.2f} seconds\n")
+            f.write(f"Image Size: {image.size}\n")
+            f.write(f"Saved Path: {filepath}\n\n")
+            
+            if additional_info:
+                f.write("Parameters:\n")
+                f.write("-----------\n")
+                for key, value in additional_info.items():
+                    f.write(f"{key}: {value}\n")
+        
+        logger.info(f"💾 Saved {image_type} image: {filepath}")
+        return filepath
+        
+    except Exception as e:
+        logger.error(f"Failed to save image: {e}")
+        return None
 
 # Authentication function
 async def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)):
@@ -308,6 +399,11 @@ async def startup_event():
     logger.info(f"API Base URL: {API_BASE_URL}")
     logger.info(f"Authentication: {'Enabled' if API_KEY else 'Disabled'}")
     logger.info(f"Allowed CORS Origins: {ALLOWED_ORIGINS}")
+    logger.info(f"Image Saving: {'Enabled' if SAVE_GENERATED_IMAGES else 'Disabled'}")
+    if SAVE_GENERATED_IMAGES:
+        logger.info(f"Output Directory: {OUTPUT_DIR}")
+    logger.info(f"Generation Defaults: steps={DEFAULT_STEPS}, guidance={DEFAULT_GUIDANCE_SCALE}")
+    logger.info(f"Inpainting Defaults: steps={DEFAULT_INPAINT_STEPS}, guidance={DEFAULT_INPAINT_GUIDANCE}, strength={DEFAULT_INPAINT_STRENGTH}")
     
     # Check GPU availability
     if not check_gpu_availability():
@@ -404,7 +500,25 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
         # Check GPU usage after generation
         print_gpu_usage("(After Image Generation)")
         
-        # Convert PIL Image to base64 string
+        # Save image locally for verification
+        additional_info = {
+            "num_inference_steps": request.num_inference_steps,
+            "guidance_scale": request.guidance_scale,
+            "width": request.width,
+            "height": request.height,
+            "negative_prompt": negative_prompt,
+            "model_used": REALVIS_MODEL
+        }
+        
+        saved_path = save_generated_image(
+            generated_image, 
+            prompt, 
+            "generate", 
+            generation_time, 
+            additional_info
+        )
+        
+        # Convert PIL Image to base64 string for API response
         img_buffer = io.BytesIO()
         generated_image.save(img_buffer, format="PNG")
         img_buffer.seek(0)
@@ -422,7 +536,8 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
             prompt=prompt,
             negative_prompt=negative_prompt,
             generation_time=round(generation_time, 2),
-            model_used=REALVIS_MODEL
+            model_used=REALVIS_MODEL,
+            saved_path=saved_path
         )
         
     except Exception as e:
@@ -440,15 +555,23 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
 
 @app.post("/inpaint", response_model=InpaintResponse, dependencies=[Depends(verify_api_key)])
 async def inpaint_image(
-    image: UploadFile = File(...),
-    mask: UploadFile = File(...),
+    image_base64: str = Form(...),
+    mask_base64: str = Form(...),
     prompt: str = Form(...),
     negative_prompt: Optional[str] = Form(None),
-    num_inference_steps: int = Form(30),
-    guidance_scale: float = Form(8.0),
-    strength: float = Form(0.95)
+    num_inference_steps: int = Form(DEFAULT_INPAINT_STEPS),
+    guidance_scale: float = Form(DEFAULT_INPAINT_GUIDANCE),
+    strength: float = Form(DEFAULT_INPAINT_STRENGTH)
 ):
-    """Inpaint an image using the inpainting model."""
+    """
+    Inpaint an image using the SDXL inpainting model.
+    
+    Optimized SDXL Inpainting Parameters:
+    - Default: steps=30, guidance_scale=8.0, strength=0.85
+    - For subtle changes: strength=0.8, guidance_scale=7.0
+    - For major changes: strength=0.9, guidance_scale=9.0
+    - Mask: White pixels = areas to inpaint, Black pixels = areas to preserve
+    """
     global inpaint_pipeline
     
     if inpaint_pipeline is None:
@@ -472,19 +595,75 @@ async def inpaint_image(
     try:
         start_time = time.time()
         
-        # Load and process images
-        image_pil = Image.open(io.BytesIO(await image.read())).convert("RGB")
-        mask_pil = Image.open(io.BytesIO(await mask.read())).convert("RGB")
+        # Decode base64 images
+        try:
+            # Remove data URL prefix if present
+            image_data = image_base64
+            if image_data.startswith('data:'):
+                image_data = image_data.split(',')[1]
+            
+            mask_data = mask_base64
+            if mask_data.startswith('data:'):
+                mask_data = mask_data.split(',')[1]
+            
+            # Decode base64
+            image_bytes = base64.b64decode(image_data)
+            mask_bytes = base64.b64decode(mask_data)
+            
+            # Convert to PIL Images
+            image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            mask_pil = Image.open(io.BytesIO(mask_bytes)).convert("L")
+            
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to decode base64 images: {str(e)}"
+            )
         
-        # Resize to 512x512 (SD 2.0 native resolution)
-        image_pil = image_pil.resize((512, 512))
-        mask_pil = mask_pil.resize((512, 512))
+        # Validate mask
+        logger.info(f"Mask mode: {mask_pil.mode}, size: {mask_pil.size}")
+        mask_extrema = mask_pil.getextrema()
+        logger.info(f"Mask min/max values: {mask_extrema}")
+        
+        # Ensure mask has white pixels for inpainting
+        if mask_extrema[1] == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid mask: mask contains no white pixels. White areas indicate regions to inpaint."
+            )
+        
+        # Resize to 1024x1024 (SDXL native resolution)
+        image_pil = image_pil.resize((1024, 1024))
+        mask_pil = mask_pil.resize((1024, 1024))
+        
+        # Optimize parameters for SDXL inpainting
+        if guidance_scale < 7.0:
+            logger.info(f"Adjusting guidance_scale from {guidance_scale} to 8.0 for optimal SDXL inpainting")
+            guidance_scale = 8.0
+        
+        if strength < 0.8:
+            logger.info(f"Adjusting strength from {strength} to 0.85 for visible SDXL inpainting changes")
+            strength = 0.85
+        
+        # Save mask for verification if image saving is enabled
+        mask_saved_path = None
+        if SAVE_GENERATED_IMAGES:
+            try:
+                ensure_output_directory()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_prompt = sanitize_filename(prompt)
+                mask_saved_path = os.path.join(OUTPUT_DIR, f"{timestamp}_mask_{safe_prompt}.png")
+                mask_pil.save(mask_saved_path)
+                logger.info(f"💾 Saved mask: {mask_saved_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save mask: {e}")
         
         print_gpu_usage("(Before Inpainting)")
         
-        # Generate inpainted image
+        # Generate inpainted image with optimized SDXL parameters
         with torch.inference_mode():
-            generator = torch.Generator(device="cuda").manual_seed(int(time.time()))
+            # Use consistent seed for reproducible results during testing
+            generator = torch.Generator(device="cuda").manual_seed(42)
             
             result = inpaint_pipeline(
                 prompt=prompt,
@@ -494,7 +673,10 @@ async def inpaint_image(
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 strength=strength,
-                generator=generator
+                generator=generator,
+                # SDXL inpainting optimizations
+                eta=0.0,  # Deterministic sampling for better quality
+                output_type="pil"
             )
         
         inpainted_image = result.images[0]
@@ -502,7 +684,28 @@ async def inpaint_image(
         
         print_gpu_usage("(After Inpainting)")
         
-        # Convert to base64
+        # Save image locally for verification
+        additional_info = {
+            "method": "base64",
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "strength": strength,
+            "negative_prompt": neg_prompt,
+            "model_used": INPAINTING_MODEL,
+            "original_image_size": image_pil.size,
+            "processed_size": "1024x1024",
+            "mask_saved_path": mask_saved_path
+        }
+        
+        saved_path = save_generated_image(
+            inpainted_image, 
+            prompt, 
+            "inpaint", 
+            generation_time, 
+            additional_info
+        )
+        
+        # Convert to base64 for API response
         img_buffer = io.BytesIO()
         inpainted_image.save(img_buffer, format="PNG")
         img_buffer.seek(0)
@@ -518,9 +721,16 @@ async def inpaint_image(
             prompt=prompt,
             negative_prompt=neg_prompt,
             generation_time=round(generation_time, 2),
-            model_used=INPAINTING_MODEL
+            model_used=INPAINTING_MODEL,
+            saved_path=saved_path,
+            mask_saved_path=mask_saved_path
         )
         
+    except HTTPException:
+        # Re-raise HTTPExceptions (like validation errors) without modification
+        torch.cuda.empty_cache()
+        print_gpu_usage("(After Inpainting Error)")
+        raise
     except Exception as e:
         error_msg = f"Failed to inpaint image: {str(e)}"
         logger.error(error_msg)
@@ -542,9 +752,11 @@ async def api_info():
         "api_base_url": API_BASE_URL,
         "environment": ENVIRONMENT,
         "authentication": "enabled" if API_KEY else "disabled",
+        "image_saving": "enabled" if SAVE_GENERATED_IMAGES else "disabled",
+        "output_directory": OUTPUT_DIR if SAVE_GENERATED_IMAGES else None,
         "endpoints": {
             "generate": "POST /generate - Generate photorealistic images",
-            "inpaint": "POST /inpaint - Inpaint masked areas of images",
+            "inpaint": "POST /inpaint - Inpaint masked areas using base64 images",
             "health": "GET /health - Health check with GPU info",
             "docs": "GET /docs - Interactive API documentation",
             "redoc": "GET /redoc - Alternative API documentation"
@@ -555,7 +767,8 @@ async def api_info():
         },
         "features": [
             "RealVis 5 photorealistic generation",
-            "Advanced inpainting capabilities",
+            "SDXL inpainting capabilities",
+            "Local image saving and verification",
             "GPU memory optimizations",
             "API key authentication",
             "CORS support for frontends",
@@ -581,7 +794,8 @@ async def root():
         "mode": "local_execution",
         "documentation": "/docs",
         "api_info": "/api",
-        "health_check": "/health"
+        "health_check": "/health",
+        "image_saving": "enabled" if SAVE_GENERATED_IMAGES else "disabled"
     }
 
 if __name__ == "__main__":

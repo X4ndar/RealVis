@@ -10,7 +10,7 @@ Next.js Frontend → API Client (this app) → External RunPod API
 
 - **Frontend**: Your Next.js application
 - **API Client**: This proxy service (provides auth, CORS, request forwarding)
-- **External API**: Your RunPod instance at `https://do9n3s330iext0-8000.proxy.runpod.net/`
+- **External API**: Your RunPod instance at `https://zfg8pskxajc6tg-8000.proxy.runpod.net/`
 
 ## 🚀 Quick Start
 
@@ -24,7 +24,7 @@ Next.js Frontend → API Client (this app) → External RunPod API
 ### External API Configuration
 ```env
 # Your RunPod API endpoint
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net/
 
 # Timeout for external API requests (seconds)
 EXTERNAL_API_TIMEOUT=300
@@ -70,7 +70,7 @@ GET /health
 ```json
 {
   "status": "healthy",
-  "external_api_url": "https://do9n3s330iext0-8000.proxy.runpod.net",
+  "external_api_url": "https://zfg8pskxajc6tg-8000.proxy.runpod.net",
   "external_api_status": "healthy",
   "api_version": "3.1.0",
   "environment": "production",
@@ -315,7 +315,7 @@ API_KEY=                           # No proxy authentication
 ALLOWED_ORIGINS=*                  # Allow all origins
 DEBUG=true                         # Enable hot reload
 LOG_LEVEL=DEBUG                    # Verbose logging
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net
 ```
 
 ### Production Setup
@@ -324,7 +324,7 @@ API_KEY=super-secure-proxy-key     # Enable proxy authentication
 ALLOWED_ORIGINS=https://yourdomain.com  # Restrict origins
 DEBUG=false                        # Production mode
 LOG_LEVEL=INFO                     # Standard logging
-API_BASE_URL=https://do9n3s330iext0-8000.proxy.runpod.net
+API_BASE_URL=https://zfg8pskxajc6tg-8000.proxy.runpod.net
 ```
 
 ## 📊 Monitoring & Debugging
